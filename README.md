@@ -2,6 +2,20 @@
 
 `teerex/laravel-fair-queue` adds a dedicated Redis queue connection that shares worker capacity among tenant or user-group partitions. It supports round robin, deficit round robin, and weighted fair queuing, partition limits, rate limits, and noisy-neighbor penalties. Jobs use Laravel's normal `queue:work` execution path.
 
+## Problem Solved
+
+On a shared queue, a tenant that dispatches a large backlog can occupy every available worker. Smaller tenants then wait behind that backlog even when their jobs are time-sensitive. This package partitions jobs by tenant or user group and schedules active partitions fairly, so a busy partition cannot monopolize the queue.
+
+It also enforces queue-wide and per-partition concurrency limits, applies dispatch and processing rate limits, and reduces capacity allocated to partitions that consistently create excessive backlog, slow jobs, or failures. Healthy partitions continue receiving service while a noisy neighbor is throttled.
+
+## How It Works
+
+Jobs sent through the `fair-redis` connection are assigned one partition key by a configurable resolver. Redis stores ready jobs per partition, tracks delayed and reserved jobs, and maintains the scheduler state for the named fair queue.
+
+When a Laravel worker calls `queue:work`, it runs a bounded Redis Lua script that selects an eligible partition using Round Robin, Deficit Round Robin, or Weighted Fair Queuing. The same atomic operation reserves the job, increments global and partition concurrency counters, and creates a lease token. Completion, release, and lease-expiry recovery verify that token before changing state, which prevents stale workers from acknowledging a later reservation.
+
+Workers perform delayed-job promotion and expired-lease recovery opportunistically. This preserves Laravel's normal retry, backoff, timeout, and failed-job flow while providing at-least-once delivery. Job handlers must remain idempotent because a worker that exceeds its lease can be retried.
+
 ## Status and compatibility
 
 This package targets PHP 8.3+ and Laravel 11, 12, and 13. On local Windows/PHP 8.3, the full suite passed against Laravel 11.57.0, 12.69.3, and 13.35.0 (19 tests and 1,169 assertions per version). Composer validation and Pint passed; PHPStan level 6 passed against Laravel 13. Linux, PHP 8.4, deployment failover, and sustained load remain CI and operational release gates; do not treat these local results alone as production certification.
