@@ -1,41 +1,93 @@
 # Laravel Fair Queue
 
-`teerex/laravel-fair-queue` adds a dedicated Redis queue connection that shares worker capacity among tenant or user-group partitions. It supports round robin, deficit round robin, and weighted fair queuing, partition limits, rate limits, and noisy-neighbor penalties. Jobs use Laravel's normal `queue:work` execution path.
+`teerex/laravel-fair-queue` shares Redis queue worker capacity across tenants or user groups. A large backlog in one partition does not have to delay every other partition. Jobs still run through Laravel's standard `queue:work` command.
 
-## Problem Solved
+Choose round robin, deficit round robin, or weighted fair queuing. Optional concurrency limits, rate limits, and noisy-neighbor controls provide further isolation.
+
+## Quick start
+
+The examples below assume the package is installed in your Laravel application. See [Installation](#installation) for the current local-repository setup.
+
+1. Publish the configuration:
+
+   ```bash
+   php artisan vendor:publish --tag=fair-queue-config
+   ```
+
+2. Dispatch a job in a partition. Replace `ProcessReport` and `$report` with a job and data from your application:
+
+   ```php
+   use Illuminate\Support\Facades\Queue;
+   use Teerex\FairQueue\Partition;
+   use Teerex\FairQueue\TenantContext;
+
+   app(TenantContext::class)->runFor(
+       new Partition('tenant', 'acme'),
+       fn () => Queue::connection('fair')->push(new ProcessReport($report)),
+   );
+   ```
+
+3. Start a dedicated worker:
+
+   ```bash
+   php artisan queue:work fair --queue=default --timeout=90 --sleep=1 --tries=3
+   ```
+
+The service provider supplies a `fair` connection when the application has not defined one. Each job needs one partition; dispatch without an identity is rejected. Set `retry_after` higher than the worker timeout and the longest expected job duration, with room for shutdown. See [Partition assignment](#partition-assignment) and [Configuration](#configuration) for other options.
+
+## Why use it?
 
 On a shared queue, a tenant that dispatches a large backlog can occupy every available worker. Smaller tenants then wait behind that backlog even when their jobs are time-sensitive. This package partitions jobs by tenant or user group and schedules active partitions fairly, so a busy partition cannot monopolize the queue.
 
 It also enforces queue-wide and per-partition concurrency limits, applies dispatch and processing rate limits, and reduces capacity allocated to partitions that consistently create excessive backlog, slow jobs, or failures. Healthy partitions continue receiving service while a noisy neighbor is throttled.
 
-## How It Works
+## How it works
 
 Jobs sent through the `fair-redis` connection are assigned one partition key by a configurable resolver. Redis stores ready jobs per partition, tracks delayed and reserved jobs, and maintains the scheduler state for the named fair queue.
 
-When a Laravel worker calls `queue:work`, it runs a bounded Redis Lua script that selects an eligible partition using Round Robin, Deficit Round Robin, or Weighted Fair Queuing. The same atomic operation reserves the job, increments global and partition concurrency counters, and creates a lease token. Completion, release, and lease-expiry recovery verify that token before changing state, which prevents stale workers from acknowledging a later reservation.
+When a Laravel worker calls `queue:work`, the scheduler selects an eligible partition and reserves one job. Reservation and concurrency accounting happen atomically in Redis. The package tracks delayed and reserved jobs and recovers expired reservations.
 
-Workers perform delayed-job promotion and expired-lease recovery opportunistically. This preserves Laravel's normal retry, backoff, timeout, and failed-job flow while providing at-least-once delivery. Job handlers must remain idempotent because a worker that exceeds its lease can be retried.
+Workers promote delayed jobs and recover expired reservations opportunistically. Laravel's normal retry, backoff, timeout, and failed-job flow still applies. Delivery is at least once, so job handlers must be idempotent. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the scheduling and lease contracts.
 
-## Status and compatibility
+### Choose a scheduling strategy
 
-This package targets PHP 8.3+ and Laravel 11, 12, and 13. On local Windows/PHP 8.3, the full suite passed against Laravel 11.57.0, 12.69.3, and 13.35.0 (19 tests and 1,169 assertions per version). Composer validation and Pint passed; PHPStan level 6 passed against Laravel 13. Linux, PHP 8.4, deployment failover, and sustained load remain CI and operational release gates; do not treat these local results alone as production certification.
+| Strategy | Setting | Use when |
+| --- | --- | --- |
+| Round robin | `rr` | Each active partition should take turns. |
+| Deficit round robin (default) | `drr` | You want weighted shares while preserving service for active partitions. |
+| Weighted fair queuing | `wfq` | You want weighted scheduling based on virtual service order. |
 
-Composer audit reported four advisories against the latest Laravel 11 framework used in the compatibility run. Applications choosing Laravel 11 must evaluate those upstream advisories and their own exposure. Prefer a patched Laravel 12 or 13 release for new deployments, and run `composer audit` against the host application's resolved dependency set.
+Set `strategy` in `config/fair-queue.php`. The default is `drr`; see [Configuration](#configuration) for weights and limits.
 
-The CI matrix keeps Laravel 11 compatibility coverage by passing Composer's `--no-security-blocking` option only while resolving that matrix job. Laravel 12 and 13 jobs retain normal blocking. This exception permits a test dependency to install; it does not resolve or dismiss the Laravel 11 advisories.
+## Requirements
 
-Use a standalone Redis primary or Redis Sentinel deployment. Redis Cluster is not supported: the current Lua scripts derive per-partition ready keys at runtime. Use a dedicated Redis database or key prefix and `maxmemory-policy noeviction`. Configure persistence and backup according to your durability needs.
+This package targets PHP 8.3+ and Laravel 11, 12, and 13. It requires a standalone Redis primary or Redis Sentinel deployment. Redis Cluster is not supported because the Lua scripts derive per-partition ready keys at runtime. Use a dedicated Redis database or key prefix and `maxmemory-policy noeviction`. Configure persistence and backup according to your durability needs.
 
-## Install
+See [compatibility and verification notes](docs/COMPATIBILITY.md) for the tested version matrix, outstanding release gates, and Laravel 11 advisory details. Run `composer audit` against your application's resolved dependencies.
 
-Until the package is published to Packagist, add this repository as a Composer `path` or `vcs` repository in the host application. The package name and discovery metadata are ready for Composer installation.
+## Installation
+
+Until the package is published to Packagist, add it as a Composer `path` repository in the host application's `composer.json`. Adjust `../laravel-fair-queue` to the package directory relative to that file:
+
+```json
+{
+  "repositories": [
+    {
+      "type": "path",
+      "url": "../laravel-fair-queue"
+    }
+  ]
+}
+```
+
+Then install and publish the configuration:
 
 ```bash
-composer require teerex/laravel-fair-queue
+composer require "teerex/laravel-fair-queue:*@dev"
 php artisan vendor:publish --tag=fair-queue-config
 ```
 
-After publishing, add or override a queue connection in the host application's `config/queue.php`:
+To override the provider's default connection settings, add a `fair` connection in the host application's `config/queue.php`:
 
 ```php
 'connections' => [
@@ -49,9 +101,11 @@ After publishing, add or override a queue connection in the host application's `
 ],
 ```
 
-The service provider creates this connection with defaults when the application has not defined it. Composer package discovery loads the provider automatically.
+Composer package discovery loads the provider automatically. It creates a `fair` connection with defaults when the application has not defined one. Define the connection above only when you need to override those defaults.
 
-Bind a resolver when tenant identity already lives in your application context:
+## Partition assignment
+
+The [quick start](#quick-start) uses `TenantContext::runFor()` to assign a partition around an existing dispatch. You can instead implement `PartitionedJob` on the job or bind a resolver when tenant identity already lives in your application context:
 
 ```php
 use Teerex\FairQueue\Contracts\PartitionResolver;
@@ -68,19 +122,6 @@ $this->app->bind(PartitionResolver::class, function ($app) {
         }
     };
 });
-```
-
-Alternatively, implement `PartitionedJob` on a job or wrap existing dispatches in `TenantContext::runFor()`:
-
-```php
-use Teerex\FairQueue\Partition;
-use Teerex\FairQueue\TenantContext;
-use Illuminate\Support\Facades\Queue;
-
-app(TenantContext::class)->runFor(
-    new Partition('tenant', 'acme'),
-    fn () => Queue::connection('fair')->push(new ProcessReport($report)),
-);
 ```
 
 Choose `new Partition('group', 'staff')` for user-group fairness. Each job has one partition key. Missing identity rejects dispatch. The queue payload carries the partition so retries and worker-side child dispatches retain context. `RestorePartition` is an optional job middleware for classes that implement `PartitionedJob`; the provider also restores context from the payload around fair job execution.
