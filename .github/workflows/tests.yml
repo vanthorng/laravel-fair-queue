@@ -27,7 +27,16 @@ jobs:
           php-version: ${{ matrix.php }}
           extensions: pcntl
           coverage: none
-      - run: composer require --dev "laravel/framework:^${{ matrix.support.laravel }}" "orchestra/testbench:^${{ matrix.support.testbench }}" --no-interaction --no-progress
+      - name: Install matrix dependencies
+        shell: bash
+        run: |
+          if [[ "${{ matrix.support.laravel }}" == "11.0" ]]; then
+            # Every Laravel 11 release is covered by upstream advisories. Keep
+            # compatibility coverage while preserving normal blocking elsewhere.
+            composer require --dev "laravel/framework:^${{ matrix.support.laravel }}" "orchestra/testbench:^${{ matrix.support.testbench }}" --no-security-blocking --no-interaction --no-progress
+          else
+            composer require --dev "laravel/framework:^${{ matrix.support.laravel }}" "orchestra/testbench:^${{ matrix.support.testbench }}" --no-interaction --no-progress
+          fi
       - run: composer validate --strict
       - run: vendor/bin/pest
       - run: vendor/bin/pint --test

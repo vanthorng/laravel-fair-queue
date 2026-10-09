@@ -8,6 +8,8 @@ This package targets PHP 8.3+ and Laravel 11, 12, and 13. On local Windows/PHP 8
 
 Composer audit reported four advisories against the latest Laravel 11 framework used in the compatibility run. Applications choosing Laravel 11 must evaluate those upstream advisories and their own exposure. Prefer a patched Laravel 12 or 13 release for new deployments, and run `composer audit` against the host application's resolved dependency set.
 
+The CI matrix keeps Laravel 11 compatibility coverage by passing Composer's `--no-security-blocking` option only while resolving that matrix job. Laravel 12 and 13 jobs retain normal blocking. This exception permits a test dependency to install; it does not resolve or dismiss the Laravel 11 advisories.
+
 Use a standalone Redis primary or Redis Sentinel deployment. Redis Cluster is not supported: the current Lua scripts derive per-partition ready keys at runtime. Use a dedicated Redis database or key prefix and `maxmemory-policy noeviction`. Configure persistence and backup according to your durability needs.
 
 ## Install
